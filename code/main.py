@@ -27,7 +27,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global Orchestrator Config
-MAX_CONCURRENT_REQUESTS = 5  # Adjust based on your API quota
+# Parallel processing enabled for maximum throughput
+MAX_CONCURRENT_REQUESTS = 5 
+# Slight staggered start to avoid instant burst 429s
+STAGGER_DELAY_SECONDS = 0.5
 
 
 async def process_single_claim(index, row, loader, vision_engine, reasoning_engine, semaphore):
@@ -38,7 +41,12 @@ async def process_single_claim(index, row, loader, vision_engine, reasoning_engi
         # Step A: Vision Pre-screening (Synchronous OpenCV check)
         image_paths = str(row['image_paths']).split(';')
         first_image_id = image_paths[0]
-        image_path = loader.image_directory_map.get(Path(first_image_id).name)
+        
+        # Correctly resolve image path using the loader's map
+        # Try full path then filename fallback
+        image_path = loader.image_directory_map.get(first_image_id)
+        if not image_path:
+            image_path = loader.image_directory_map.get(Path(first_image_id).name)
 
         vision_results = {"valid": False, "risk_flags": ["image_not_found"]}
         if image_path:
@@ -68,45 +76,75 @@ async def main_orchestrator():
 
     if loader.claims_df is not None:
         total_claims = len(loader.claims_df)
-        logger.info(f"Starting parallel processing for {total_claims} claims...")
+        logger.info(f"Starting parallel processing for {total_claims} claims with real-time saving...")
 
-        # 3. Create Semaphore for Global Rate Limiting
+        # 3. Setup Real-Time Output Path
+        project_root = loader.dataset_path.parent
+        output_path = project_root / "output.csv"
+        dataset_output_path = loader.dataset_path / "output.csv"
+        
+        # 4. Create Semaphore for Global Rate Limiting
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-        # 4. Create Tasks
+        # 5. Create Tasks with Staggered Start
         tasks = []
         for index, row in loader.claims_df.iterrows():
             tasks.append(
                 process_single_claim(index, row, loader, vision_engine, reasoning_engine, semaphore)
             )
 
-        # 5. Execute and Gather Results
-        results_list = await asyncio.gather(*tasks)
+        # 6. Execute and Save in Real-Time as they complete
+        results_list = []
+        for task in asyncio.as_completed(tasks):
+            result = await task
+            
+            if result:
+                results_list.append(result)
+                # Convert single result to DataFrame and append to CSV
+                res_df = pd.DataFrame([result])
+                
+                # Write header only for the first result, then append
+                write_header = not output_path.exists()
+                res_df.to_csv(output_path, mode='a', index=False, header=write_header)
+                res_df.to_csv(dataset_output_path, mode='a', index=False, header=write_header)
+                
+                logger.info(f"Progress: {len(results_list)}/{total_claims} saved to {output_path}")
 
-        # Filter out failed tasks
-        valid_results = [r for r in results_list if r is not None]
-
-        # 6. Save Output
-        if valid_results:
-            output_df = pd.DataFrame(valid_results)
-            output_path = loader.dataset_path / "output.csv"
-            output_df.to_csv(output_path, index=False)
-            logger.info(f"SUCCESS: {len(valid_results)} results saved to {output_path}")
+        if results_list:
+            logger.info(f"SUCCESS: Total {len(results_list)} results finalized at {output_path}")
+            
+            # Final Sort: Ensure output.csv is in ascending order by user_id for submission
+            logger.info("Sorting final output by user_id...")
+            final_df = pd.DataFrame(results_list)
+            # Handle numeric user_ids if necessary, otherwise string sort
+            if 'user_id' in final_df.columns:
+                # Try to extract number for natural sorting if format is user_001
+                final_df['sort_key'] = final_df['user_id'].str.extract('(\d+)').astype(float)
+                final_df = final_df.sort_values('sort_key').drop(columns=['sort_key'])
+                
+                final_df.to_csv(output_path, index=False)
+                final_df.to_csv(dataset_output_path, index=False)
+                logger.info("Final output sorted successfully.")
         else:
-            logger.warning("No valid results to save.")
+            logger.warning("No valid results were generated.")
     else:
-        logger.warning("ANo claims found in dataset/claims.csv")
+        logger.warning("No claims found in dataset/claims.csv")
 
-    # 7. Generate Evaluation Report
+    # 6. Generate Evaluation Report
     logger.info("--- Generating Evaluation Report ---")
-    generate_evaluation_report(loader.dataset_path, reasoning_engine.metrics)
+    
+    # Inject total time into metrics
+    metrics = reasoning_engine.metrics
+    metrics["total_processing_time_sec"] = round(time.perf_counter() - start_time_global, 2)
+    
+    generate_evaluation_report(loader.dataset_path, metrics)
 
 
 if __name__ == "__main__":
-    start_time = time.perf_counter()
+    start_time_global = time.perf_counter()
     try:
         asyncio.run(main_orchestrator())
     except Exception as e:
         logger.error(f"Orchestrator crashed: {e}")
     end_time = time.perf_counter()
-    logger.info(f"Total processing time: {end_time - start_time:.2f} seconds")
+    logger.info(f"Total processing time: {end_time - start_time_global:.2f} seconds")

@@ -45,10 +45,13 @@ class ReasoningEngine:
             int(os.getenv("GROQ_RPM_LIMIT", 30))
         )
 
-        # Tiered Models
-        self.primary_model = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-        self.critic_model = os.getenv("GEMINI_CRITIC_MODEL", "gemini-2.5-flash")
-        self.judge_model = os.getenv("GEMINI_JUDGE_MODEL", "gemini-2.5-flash")
+        # Tiered Models (Operationally Superior Strategy)
+        # Primary: Stays on Flash for speed and efficiency.
+        # Critic/Judge: Try Pro for elite reasoning, fallback to Flash if Pro is unavailable.
+        self.primary_model = "gemini-2.0-flash"
+        self.critic_model = "gemini-1.5-pro"
+        self.judge_model = "gemini-1.5-pro"
+        self.fallback_model = "gemini-2.0-flash"
 
         # Groq Fallback (Primary for Logic to save Gemini Quota)
         self.groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
@@ -81,17 +84,20 @@ class ReasoningEngine:
 
     async def _call_gemini_with_retry(self, model_id: str, contents: list, system_instr: str, max_retries: int = 3) -> Optional[Dict]:
         """Call Gemini with rate limiting, retries, and smart model fallbacks."""
-        self.metrics["gemini_calls"] += 1
         est_tokens = 2000 if any(isinstance(c, Image.Image) for c in contents) else 500
         
-        # Determine fallback model (Tiered logic)
-        fallback_model = self.primary_model if model_id != self.primary_model else None
+        # Determine fallback logic: Only high-tier models fall back to Flash.
+        # Flash itself has no further fallback.
+        current_fallback = self.fallback_model if model_id != self.fallback_model else None
         
         for attempt in range(max_retries):
+            # 1. Acquire slot from Global Rate Limiter
             if not await rate_limiter.acquire("gemini", est_tokens):
+                logger.warning(f"Rate limit acquisition failed for Gemini (Attempt {attempt+1})")
                 continue
 
             try:
+                self.metrics["gemini_calls"] += 1
                 response = await self.client.aio.models.generate_content(
                     model=model_id,
                     contents=contents,
@@ -101,23 +107,37 @@ class ReasoningEngine:
                     )
                 )
                 
-                # Track Gemini Tokens (Gap 2.7)
+                # Track Gemini Tokens
                 if response.usage_metadata:
                     self.metrics["gemini_tokens"] += response.usage_metadata.total_token_count
                 
                 return json.loads(response.text)
+
             except Exception as e:
-                # Handle 404 (Model not found) or 403 (Permission denied) by falling back to Primary
-                if ("404" in str(e) or "403" in str(e)) and fallback_model:
-                    logger.warning(f"Model {model_id} unavailable. Falling back to {fallback_model}...")
-                    return await self._call_gemini_with_retry(fallback_model, contents, system_instr, max_retries=1)
+                err_msg = str(e).upper()
                 
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.random() * 2
-                    logger.warning(f"Gemini API 429. Retrying in {wait_time:.2f}s...")
+                # Case A: Model Not Found (404) or Permission Denied (403)
+                if any(x in err_msg for x in ["404", "NOT_FOUND", "403", "PERMISSION_DENIED"]):
+                    if current_fallback:
+                        logger.warning(f"Model {model_id} unavailable. Falling back to {current_fallback}...")
+                        return await self._call_gemini_with_retry(current_fallback, contents, system_instr, max_retries=1)
+                    else:
+                        logger.error(f"Model {model_id} failed and no fallback available: {e}")
+                        break
+
+                # Case B: Rate Limited (429)
+                if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                    # Exponential backoff with jitter
+                    wait_time = (2 ** (attempt + 2)) + random.random() * 2
+                    logger.warning(f"Gemini API 429 ({model_id}, Attempt {attempt+1}). Backing off for {wait_time:.2f}s...")
                     await asyncio.sleep(wait_time)
+                    continue
+
+                # Case C: Other Errors (Network, 500s, etc.)
+                logger.error(f"Gemini error ({model_id}) on attempt {attempt+1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.5)
                 else:
-                    logger.error(f"Gemini error ({model_id}): {e}")
                     break
         return None
 
@@ -169,16 +189,17 @@ class ReasoningEngine:
         image_paths = str(row['image_paths']).split(';')
 
         # 0. Load Evidence Requirements (Gap 2 Implementation)
-        # Fetch requirements based on object type. We use 'all' as a general fallback.
+        # Fetch requirements based on object type.
+        # Note: We use the actual issue_type if logic_result provides it later, 
+        # but for now we pull general requirements to guide the primary vision agent.
         evidence_req = self.data_loader.get_evidence_requirement(claim_object_val, "general claim review")
         req_instruction = ""
         if evidence_req:
-            # Note: Using 'minimum_image_evidence' from the actual CSV schema
             req_instruction = (
                 f"\nEVIDENCE REQUIREMENTS for {claim_object_val}:\n"
                 f"- Required Evidence: {evidence_req.get('minimum_image_evidence', 'Standard visual proof')}\n"
             )
-            logger.info(f"Applying evidence requirements for {claim_object_val}")
+            logger.info(f"Applying evidence requirements for {claim_object_val} (User: {user_id})")
 
         # 1. Logic via Groq (No Quota Cost)
         user_history = self.data_loader.get_user_history(user_id)
