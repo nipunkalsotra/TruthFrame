@@ -76,39 +76,50 @@ async def main_orchestrator():
 
     if loader.claims_df is not None:
         total_claims = len(loader.claims_df)
-        logger.info(f"Starting parallel processing for {total_claims} claims with real-time saving...")
+        logger.info(f"Starting parallel processing for {total_claims} claims with live-sorting...")
 
-        # 3. Setup Real-Time Output Path
+        # 3. Setup Paths and FRESH START (Delete old files)
         project_root = loader.dataset_path.parent
         output_path = project_root / "output.csv"
         dataset_output_path = loader.dataset_path / "output.csv"
+        report_path = Path(__file__).parent / "evaluation" / "evaluation_report.md"
+        
+        for p in [output_path, dataset_output_path, report_path]:
+            if p.exists():
+                p.unlink()
+                logger.info(f"Cleared old file: {p.name}")
         
         # 4. Create Semaphore for Global Rate Limiting
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
-        # 5. Create Tasks with Staggered Start
+        # 5. Create Tasks
         tasks = []
         for index, row in loader.claims_df.iterrows():
             tasks.append(
                 process_single_claim(index, row, loader, vision_engine, reasoning_engine, semaphore)
             )
 
-        # 6. Execute and Save in Real-Time as they complete
+        # 6. Execute, Live-Sort, and Save in Real-Time
         results_list = []
         for task in asyncio.as_completed(tasks):
             result = await task
             
             if result:
                 results_list.append(result)
-                # Convert single result to DataFrame and append to CSV
-                res_df = pd.DataFrame([result])
                 
-                # Write header only for the first result, then append
-                write_header = not output_path.exists()
-                res_df.to_csv(output_path, mode='a', index=False, header=write_header)
-                res_df.to_csv(dataset_output_path, mode='a', index=False, header=write_header)
+                # LIVE SORTING: Arrange results_list by user_id numerically
+                # This ensures output.csv is ALWAYS in order even during parallel runs
+                sorted_results = sorted(
+                    results_list, 
+                    key=lambda x: int(''.join(filter(str.isdigit, x['user_id']))) if any(c.isdigit() for c in x['user_id']) else x['user_id']
+                )
                 
-                logger.info(f"Progress: {len(results_list)}/{total_claims} saved to {output_path}")
+                # Overwrite CSV with current sorted state
+                res_df = pd.DataFrame(sorted_results)
+                res_df.to_csv(output_path, index=False)
+                res_df.to_csv(dataset_output_path, index=False)
+                
+                logger.info(f"Progress: {len(results_list)}/{total_claims} (Live-Sorted in {output_path})")
                 
                 # Update Evaluation Report in Real-Time
                 try:
