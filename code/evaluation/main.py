@@ -52,14 +52,32 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict):
             metrics_results.update(calculate_metrics(y_true, y_pred, field))
 
     report_content = "# TruthFrame Evaluation Report\n\n"
-    report_content += "## Operational Metrics\n\n"
+    report_content += "## Operational Command Center (Metrics)\n\n"
+    
+    # Organize metrics into a table for better readability (Operationally Superior)
+    report_content += "| Metric | Value |\n"
+    report_content += "| :--- | :--- |\n"
     for key, value in operational_metrics.items():
-        report_content += f"- **{key.replace('_',' ').title()}**: {value}\n"
+        report_content += f"| {key.replace('_',' ').title()} | {value} |\n"
     report_content += "\n"
 
-    report_content += "## Performance Metrics\n\n"
-    for key, value in metrics_results.items():
-        report_content += f"- **{key.replace('_',' ').title()}**: {value:.4f}\n"
+    report_content += "## Model Performance (Accuracy vs Sample)\n\n"
+    report_content += "| Field | Accuracy | Precision | Recall | F1-Score |\n"
+    report_content += "| :--- | :--- | :--- | :--- | :--- |\n"
+    
+    # Group metrics by field for the table
+    for field in fields_to_evaluate:
+        acc = metrics_results.get(f"{field}_accuracy", 0)
+        prec = metrics_results.get(f"{field}_precision", 0)
+        rec = metrics_results.get(f"{field}_recall", 0)
+        f1 = metrics_results.get(f"{field}_f1", 0)
+        report_content += f"| {field.replace('_',' ').title()} | {acc:.2%} | {prec:.2%} | {rec:.2%} | {f1:.2%} |\n"
+    report_content += "\n"
+    
+    report_content += "## Cost Efficiency Summary\n"
+    total_tokens = operational_metrics.get("gemini_tokens", 0) + operational_metrics.get("groq_tokens", 0)
+    report_content += f"- **Total Tokens Consumed**: {total_tokens:,}\n"
+    report_content += f"- **Average Tokens per Claim**: {total_tokens / len(output_df) if len(output_df) > 0 else 0:.1f}\n"
     report_content += "\n"
 
     with open(report_path, "w") as f:
@@ -77,8 +95,7 @@ if __name__ == "__main__":
         "images_processed": 200,
         "self_corrections": 5
     }
-    # Assuming dataset_path is passed correctly from main.py
-    # For this script, we'll use a relative path for demonstration
-    current_dir = Path(__file__).parent
-    dataset_root = current_dir.parent.parent / "dataset"
+    # Use absolute path relative to project root (hackerrank-orchestrate-june26)
+    project_root = Path(__file__).resolve().parent.parent.parent
+    dataset_root = project_root / "dataset"
     generate_evaluation_report(dataset_root, mock_operational_metrics)

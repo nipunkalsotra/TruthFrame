@@ -10,7 +10,19 @@ logger = logging.getLogger(__name__)
 class DataLoader:
     def __init__(self):
         self.code_dir = Path(__file__).parent
-        self.dataset_path = self.code_dir.parent / "dataset"
+        
+        # Dynamic dataset path discovery
+        current_path = self.code_dir
+        self.dataset_path = None
+        for _ in range(3):
+            if (current_path.parent / "dataset").exists():
+                self.dataset_path = current_path.parent / "dataset"
+                break
+            current_path = current_path.parent
+            
+        if not self.dataset_path:
+            self.dataset_path = self.code_dir.parent / "dataset"
+            
         self.user_history_cache: Dict[str, Dict] = {}
         self.evidence_requirements_cache: Dict[str, Dict] = {}
         self.claims_df: Optional[pd.DataFrame] = None
@@ -50,12 +62,22 @@ class DataLoader:
             logger.info(f"Loaded {len(self.claims_df)} claims.")
     
     def _index_image_directory(self) -> None:
+        """Index images using a unique composite key (parent_dir/filename) to prevent collisions."""
         images_path = self.dataset_path / "images"
         if images_path.exists():
             for image_file in images_path.rglob("*"):
                 if image_file.is_file() and image_file.suffix.lower() in ['.jpg', '.jpeg', '.png']:
-                    self.image_directory_map[image_file.name] = image_file
-            logger.info(f"Indexed {len(self.image_directory_map)} images.")
+                    # Use parent directory + filename as a unique key (e.g., 'case_001/img_1.jpg')
+                    # This handles the case where multiple claims reference images with identical filenames
+                    relative_path = image_file.relative_to(images_path)
+                    unique_key = str(relative_path)
+                    self.image_directory_map[unique_key] = image_file
+                    
+                    # Also keep filename as fallback if it's unique, but unique_key is preferred
+                    if image_file.name not in self.image_directory_map:
+                         self.image_directory_map[image_file.name] = image_file
+                         
+            logger.info(f"Indexed {len(self.image_directory_map)} image keys.")
 
     def get_user_history(self, user_id: str) -> Optional[Dict]:
         return self.user_history_cache.get(str(user_id))
@@ -65,16 +87,28 @@ class DataLoader:
         return res if res else self.evidence_requirements_cache.get(f"all_{issue_family}")
 
     def get_image(self, image_id: str) -> Optional[Image.Image]:
-        image_name = Path(image_id).name
-        if image_name in self.image_cache:
-            return self.image_cache[image_name]
-        full_path = self.image_directory_map.get(image_name)
-        if not full_path: return None
+        """Retrieve image from cache or disk using a unique identifier."""
+        # image_id can be a filename or a relative path (e.g., 'case_001/img_1.jpg')
+        if image_id in self.image_cache:
+            return self.image_cache[image_id]
+            
+        full_path = self.image_directory_map.get(image_id)
+        
+        # Fallback to just filename if relative path lookup fails
+        if not full_path:
+            image_name = Path(image_id).name
+            full_path = self.image_directory_map.get(image_name)
+            
+        if not full_path: 
+            logger.warning(f"Image not found: {image_id}")
+            return None
+            
         try:
             image = Image.open(full_path)
-            self.image_cache[image_name] = image
+            self.image_cache[image_id] = image
             return image
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error loading image {image_id}: {e}")
             return None
 
     def get_claims_batch(self, batch_size: int = 32):

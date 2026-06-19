@@ -11,6 +11,31 @@ class SchemaValidator:
     def __init__(self, groq_client, groq_model):
         self.groq_client = groq_client
         self.groq_model = groq_model
+        
+        # Deterministic mapping for common hallucinations (Gap 2.6)
+        self.fuzzy_map = {
+            "issue_type": {
+                "cracked": "crack",
+                "shattered": "glass_shatter",
+                "dented": "dent",
+                "scratched": "scratch",
+                "broken": "broken_part",
+                "missing": "missing_part",
+                "wet": "water_damage",
+                "flooded": "water_damage",
+                "torn": "torn_packaging",
+                "crushed": "crushed_packaging"
+            },
+            "object_part": {
+                "glass": "windshield",
+                "tire": "body", # Fallback to body if part not in enum
+                "mirror": "side_mirror",
+                "bumper": "front_bumper", # Default to front
+                "keyboard_area": "keyboard",
+                "monitor": "screen",
+                "packaging": "box"
+            }
+        }
 
     async def _call_groq_correction(self, prompt: str) -> Dict:
         try:
@@ -25,13 +50,21 @@ class SchemaValidator:
             return {}
 
     async def validate_and_correct(self, data: Dict[str, Any], original_row: Dict) -> ClaimOutput:
+        # Step 1: Pre-validation Deterministic Mapping (Gap 2.6)
+        for field, mapping in self.fuzzy_map.items():
+            current_val = str(data.get(field, "")).lower()
+            if current_val in mapping:
+                logger.info(f"Applying deterministic mapping for {field}: {current_val} -> {mapping[current_val]}")
+                data[field] = mapping[current_val]
+
         try:
             # Attempt to validate with Pydantic
             validated_output = ClaimOutput(**data)
             return validated_output
         except ValidationError as e:
-            logger.warning(f"Schema validation failed for claim {original_row["user_id"]}: {e}")
-            # Extract problematic fields and their allowed values
+            logger.warning(f"Schema validation failed for claim {original_row['user_id']}: {e}")
+            
+            # Step 2: Extract problematic fields and their allowed values
             correction_needed = {}
             for error in e.errors():
                 field = error["loc"][0]
