@@ -123,9 +123,18 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
     else:
         report.append("## 🎯 3. Model Performance\n*Waiting for overlapping user_ids to calculate accuracy...*")
 
-    # 4. Final Strategy Used
-    report.append("\n## 🚀 4. Final Strategy Summary")
-    report.append("TruthFrame uses a multi-agent consensus pipeline. It first extracts logic and severity via Groq (Llama 3), then performs visual verification via Gemini 2.0 Flash. High-risk or ambiguous claims are escalated to a Critic agent for cross-verification, and all outputs are passed through a self-correction loop to ensure 100% schema compliance.")
+    # 4. Model Comparison Strategy
+    report.append("\n## 🔬 4. Strategy Comparison")
+    report.append("| Configuration | Reasoning Depth | Cost Efficiency | Stability (Free Tier) |")
+    report.append("| :--- | :--- | :--- | :--- |")
+    report.append("| **Gemini 1.5 Pro** | 🏆 Elite | ⚠️ High | ❌ Low (404/429 frequent) |")
+    report.append("| **Gemini 2.0 Flash** | ⚡ High | 🏆 Elite | ⚠️ Medium (New Quotas) |")
+    report.append("| **Gemini 1.5 Flash** | ✅ Balanced | 🏆 Elite | 🏆 High (Best RPM/TPM) |")
+    report.append("\n**Decision:** We selected **Gemini 1.5 Flash** for the final pipeline to ensure 100% operational stability during the hackathon's high-traffic period while maintaining a multi-agent consensus architecture.")
+
+    # 5. Final Strategy Used
+    report.append("\n## 🚀 5. Final Strategy Summary")
+    report.append("TruthFrame uses a multi-agent consensus pipeline. It first extracts logic and severity via Groq (Llama 3), then performs visual verification via Gemini 1.5 Flash. High-risk or ambiguous claims are escalated to a Critic agent for cross-verification, and all outputs are passed through a self-correction loop to ensure 100% schema compliance.")
 
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(report))

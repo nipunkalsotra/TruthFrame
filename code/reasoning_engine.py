@@ -46,12 +46,11 @@ class ReasoningEngine:
         )
 
         # Tiered Models (Operationally Superior Strategy)
-        # Primary: Stays on Flash for speed and efficiency.
-        # Critic/Judge: Try Pro for elite reasoning, fallback to Flash if Pro is unavailable.
-        self.primary_model = "gemini-2.0-flash"
-        self.critic_model = "gemini-1.5-pro"
-        self.judge_model = "gemini-1.5-pro"
-        self.fallback_model = "gemini-2.0-flash"
+        # Using 1.5-flash for maximum stability on Free Tier
+        self.primary_model = "gemini-1.5-flash"
+        self.critic_model = "gemini-1.5-flash"
+        self.judge_model = "gemini-1.5-flash"
+        self.fallback_model = "gemini-1.5-flash"
 
         # Groq Fallback (Primary for Logic to save Gemini Quota)
         self.groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
@@ -272,7 +271,9 @@ class ReasoningEngine:
         if is_high_risk:
             risks.append("user_history_risk")
         if not final_result:
-            risks.append("vision_service_unavailable")
+            # "vision_service_unavailable" is not in the allowed schema
+            # Using "manual_review_required" which IS allowed
+            risks.append("manual_review_required")
 
         raw_output_data = self._create_raw_output_data(
             row, status,
@@ -298,8 +299,13 @@ class ReasoningEngine:
         else:
             supporting = str(supporting)
 
-        if not risks or risks == ["none"]:
-            risks = ["none"]
+        # Ensure risk_flags is a clean semicolon-separated string
+        # Strip "none" if other flags are present
+        risks_clean = [r for r in risks if r != "none" and r.strip()]
+        if not risks_clean:
+            risks_final = ["none"]
+        else:
+            risks_final = list(set(risks_clean))
 
         return {
             "user_id": str(row['user_id']),
@@ -308,7 +314,7 @@ class ReasoningEngine:
             "claim_object": ClaimObjectEnum(row['claim_object']).value,
             "evidence_standard_met": (status != "not_enough_information" and valid),
             "evidence_standard_met_reason": justification[:200],
-            "risk_flags": ";".join(risks),
+            "risk_flags": ";".join(risks_final),
             "issue_type": IssueTypeEnum(issue).value if issue in [e.value for e in IssueTypeEnum] else IssueTypeEnum.UNKNOWN.value,
             "object_part": ObjectPartEnum(part).value if part in [e.value for e in ObjectPartEnum] else ObjectPartEnum.UNKNOWN.value,
             "claim_status": ClaimStatusEnum(status).value if status in [e.value for e in ClaimStatusEnum] else ClaimStatusEnum.NOT_ENOUGH_INFORMATION.value,
