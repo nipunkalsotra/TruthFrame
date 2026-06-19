@@ -109,6 +109,14 @@ async def main_orchestrator():
                 res_df.to_csv(dataset_output_path, mode='a', index=False, header=write_header)
                 
                 logger.info(f"Progress: {len(results_list)}/{total_claims} saved to {output_path}")
+                
+                # Update Evaluation Report in Real-Time
+                try:
+                    metrics = reasoning_engine.metrics
+                    metrics["total_processing_time_sec"] = round(time.perf_counter() - start_time_global, 2)
+                    generate_evaluation_report(loader.dataset_path, metrics, is_final=False)
+                except Exception as e:
+                    logger.warning(f"Could not update real-time report: {e}")
 
         if results_list:
             logger.info(f"SUCCESS: Total {len(results_list)} results finalized at {output_path}")
@@ -130,14 +138,14 @@ async def main_orchestrator():
     else:
         logger.warning("No claims found in dataset/claims.csv")
 
-    # 6. Generate Evaluation Report
-    logger.info("--- Generating Evaluation Report ---")
+    # 6. Finalize Evaluation Report
+    logger.info("--- Finalizing Evaluation Report ---")
     
     # Inject total time into metrics
     metrics = reasoning_engine.metrics
     metrics["total_processing_time_sec"] = round(time.perf_counter() - start_time_global, 2)
     
-    generate_evaluation_report(loader.dataset_path, metrics)
+    generate_evaluation_report(loader.dataset_path, metrics, is_final=True)
 
 
 if __name__ == "__main__":
