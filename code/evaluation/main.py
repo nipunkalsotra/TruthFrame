@@ -106,7 +106,7 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
     report.append("- **Rate Limiting**: Centralized `GlobalRateLimiter` using Token Bucket algorithm.")
     report.append("- **Concurrency**: Capped at 5 concurrent requests to respect Free Tier limits.")
     report.append("- **Retry Logic**: Exponential backoff with jitter (2^n + random) to handle 429s.")
-    report.append("- **Tiered Models**: Primary use of Gemini 2.0 Flash with Pro fallback for high-risk claims.")
+    report.append("- **Tiered Models**: Primary use of Gemini 1.5 Flash with Flash fallback for high-risk claims.")
     report.append("\n")
 
     # 3. Model Performance
@@ -128,7 +128,7 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
     report.append("| Configuration | Reasoning Depth | Cost Efficiency | Stability (Free Tier) |")
     report.append("| :--- | :--- | :--- | :--- |")
     report.append("| **Gemini 1.5 Pro** | 🏆 Elite | ⚠️ High | ❌ Low (404/429 frequent) |")
-    report.append("| **Gemini 2.0 Flash** | ⚡ High | 🏆 Elite | ⚠️ Medium (New Quotas) |")
+    report.append("| **Gemini 1.5 Flash (Multi-Agent)** | ⚡ High | 🏆 Elite | ✅ High (Best RPM/TPM on Free Tier) |")
     report.append("| **Gemini 1.5 Flash** | ✅ Balanced | 🏆 Elite | 🏆 High (Best RPM/TPM) |")
     report.append("\n**Decision:** We selected **Gemini 1.5 Flash** for the final pipeline to ensure 100% operational stability during the hackathon's high-traffic period while maintaining a multi-agent consensus architecture.")
 

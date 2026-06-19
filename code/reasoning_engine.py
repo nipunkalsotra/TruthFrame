@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import asyncio
 import random
@@ -31,6 +32,11 @@ class ReasoningEngine:
     def __init__(self, data_loader):
         self.data_loader = data_loader
         self.api_key = os.getenv("GOOGLE_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY not set. Create a .env file with GOOGLE_API_KEY=AIza... "
+                "or run: export GOOGLE_API_KEY='AIza...'"
+            )
         self.client = genai.Client(api_key=self.api_key)
         
         # Configure rate limits from env or defaults
@@ -71,24 +77,66 @@ class ReasoningEngine:
     def _get_system_instruction(self, claim_object: ClaimObjectEnum, role: str = "Analyst") -> str:
         issue_types = [e.value for e in IssueTypeEnum]
         object_parts = [e.value for e in ObjectPartEnum]
+        risk_flags = [
+            "none", "blurry_image", "cropped_or_obstructed", "low_light_or_glare",
+            "wrong_angle", "wrong_object", "wrong_object_part", "damage_not_visible",
+            "claim_mismatch", "possible_manipulation", "non_original_image",
+            "text_instruction_present", "user_history_risk", "manual_review_required"
+        ]
 
         return (
-            f"You are an {role} for {claim_object.value} insurance claims.\n"
-            f"Rules:\n"
-            f"1. PRIMARY source: Visual evidence.\n"
-            f"2. Allowed issues: {issue_types}\n"
-            f"3. Allowed parts: {object_parts}\n"
-            f"4. Be concise and professional.\n"
+            f"You are a {role} for {claim_object.value} insurance damage claims. "
+            f"Analyze the submitted images against the user's claim.\n\n"
+            f"RULES:\n"
+            f"1. Images are the PRIMARY source of truth. What you SEE overrides what the user says.\n"
+            f"2. Use 'not_enough_information' if images are insufficient to make a determination.\n"
+            f"3. Use 'unknown' for fields you cannot determine from visual evidence alone.\n"
+            f"4. Return ONLY valid JSON — no markdown fences, no explanation text.\n\n"
+            f"ALLOWED VALUES:\n"
+            f"- issue_type: {issue_types}\n"
+            f"- object_part: {object_parts}\n"
+            f"- claim_status: [\"supported\", \"contradicted\", \"not_enough_information\"]\n"
+            f"- severity: [\"none\", \"low\", \"medium\", \"high\", \"unknown\"]\n"
+            f"- risk_flags: {risk_flags}\n\n"
+            f"REQUIRED JSON SCHEMA:\n"
+            f"{{\n"
+            f"  \"claim_status\": \"<supported|contradicted|not_enough_information>\",\n"
+            f"  \"claim_status_justification\": \"<image-grounded reason, max 200 chars>\",\n"
+            f"  \"evidence_standard_met\": <true|false>,\n"
+            f"  \"evidence_standard_met_reason\": \"<why evidence is/isn't sufficient, max 150 chars>\",\n"
+            f"  \"issue_type\": \"<one value from allowed list>\",\n"
+            f"  \"object_part\": \"<one value from allowed list>\",\n"
+            f"  \"severity\": \"<none|low|medium|high|unknown>\",\n"
+            f"  \"risk_flags\": [\"<values from allowed list, or none>\"],\n"
+            f"  \"valid_image\": <true|false>,\n"
+            f"  \"supporting_image_ids\": \"<img_1;img_2 or none>\"\n"
+            f"}}"
         )
+
+    def _build_contents(self, contents: list) -> list:
+        """Convert mixed list of strings and PIL Images to proper SDK Part objects."""
+        parts = []
+        for item in contents:
+            if isinstance(item, str):
+                parts.append(types.Part.from_text(text=item))
+            elif isinstance(item, Image.Image):
+                buf = io.BytesIO()
+                item.convert("RGB").save(buf, format="JPEG", quality=85)
+                parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+        return parts
 
     async def _call_gemini_with_retry(self, model_id: str, contents: list, system_instr: str, max_retries: int = 3) -> Optional[Dict]:
         """Call Gemini with rate limiting, retries, and smart model fallbacks."""
-        est_tokens = 2000 if any(isinstance(c, Image.Image) for c in contents) else 500
-        
+        has_images = any(isinstance(c, Image.Image) for c in contents)
+        est_tokens = 2000 if has_images else 500
+
+        # Convert to proper Part objects for guaranteed SDK compatibility
+        formatted_contents = self._build_contents(contents)
+
         # Determine fallback logic: Only high-tier models fall back to Flash.
         # Flash itself has no further fallback.
         current_fallback = self.fallback_model if model_id != self.fallback_model else None
-        
+
         for attempt in range(max_retries):
             # 1. Acquire slot from Global Rate Limiter
             if not await rate_limiter.acquire("gemini", est_tokens):
@@ -99,7 +147,7 @@ class ReasoningEngine:
                 self.metrics["gemini_calls"] += 1
                 response = await self.client.aio.models.generate_content(
                     model=model_id,
-                    contents=contents,
+                    contents=formatted_contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instr,
                         response_mime_type="application/json"
@@ -218,15 +266,16 @@ class ReasoningEngine:
 
         primary_result = {}
         if valid_image:
-            # Rate limiting is handled inside _call_gemini_with_retry
             logger.info(f"Primary Agent Review: User {user_id}")
-            primary_prompt = [f"Verify claim: '{row['user_claim']}'"]
-            if req_instruction:
-                primary_prompt[0] += f"\nMandatory validation criteria: {req_instruction}"
-            
+            primary_prompt_text = (
+                f"USER CLAIM: {row['user_claim']}\n"
+                f"OBJECT TYPE: {claim_object.value}\n"
+                f"{req_instruction}\n"
+                f"Analyze the image(s) above and return the required JSON schema exactly."
+            )
             primary_result = await self._call_gemini_with_retry(
                 self.primary_model,
-                primary_prompt + images,
+                [primary_prompt_text] + images,
                 self._get_system_instruction(claim_object)
             )
 
@@ -248,9 +297,16 @@ class ReasoningEngine:
                 reason = "High Risk" if is_high_risk else "Ambiguous Result" if not is_visually_complex else "Visual Complexity"
                 logger.info(f"Critic Agent Review ({reason}): User {user_id}")
                 
+                critic_prompt_text = (
+                    f"CRITIC REVIEW — Try to find reasons the primary assessment is wrong.\n"
+                    f"USER CLAIM: {row['user_claim']}\n"
+                    f"OBJECT TYPE: {claim_object.value}\n"
+                    f"PRIMARY SAID: {(primary_result or {}).get('claim_status', 'unknown')}\n"
+                    f"Re-examine the image(s) independently. Return the required JSON schema exactly."
+                )
                 critic_result = await self._call_gemini_with_retry(
                     self.critic_model,
-                    [f"CRITIC REVIEW: Verify claim: '{row['user_claim']}'"] + images,
+                    [critic_prompt_text] + images,
                     self._get_system_instruction(claim_object, "Senior Reviewer")
                 )
 
@@ -263,24 +319,63 @@ class ReasoningEngine:
 
         # 4. Synthesize Raw Output for Validation
         status = final_result.get("claim_status", "not_enough_information")
-        justification = final_result.get(
-            "justification",
-            logic_result.get("logic_justification", "No visual evidence available.")
+
+        # VLM returns "claim_status_justification"; fall back to Groq logic text
+        justification = (
+            final_result.get("claim_status_justification") or
+            final_result.get("justification") or
+            logic_result.get("logic_justification") or
+            "No visual evidence available."
         )
-        risks = list(set(final_result.get("risk_flags", []) + vision_results.get("risk_flags", [])))
+        evidence_reason = (
+            final_result.get("evidence_standard_met_reason") or
+            justification[:150]
+        )
+
+        # VLM risk_flags is a list; vision risk_flags may also be a list
+        vlm_risks = final_result.get("risk_flags", [])
+        if isinstance(vlm_risks, str):
+            vlm_risks = [r.strip() for r in vlm_risks.split(";") if r.strip()]
+        cv_risks = vision_results.get("risk_flags", [])
+        if isinstance(cv_risks, str):
+            cv_risks = [r.strip() for r in cv_risks.split(";") if r.strip()]
+        risks = list(set(vlm_risks + cv_risks))
+
         if is_high_risk:
             risks.append("user_history_risk")
         if not final_result:
-            # "vision_service_unavailable" is not in the allowed schema
-            # Using "manual_review_required" which IS allowed
             risks.append("manual_review_required")
 
+        # Prefer VLM-derived fields; fall back to Groq text-only extraction
+        issue_type = (
+            final_result.get("issue_type") or
+            logic_result.get("issue_type", "unknown")
+        )
+        object_part = (
+            final_result.get("object_part") or
+            logic_result.get("object_part", "unknown")
+        )
+        severity = (
+            final_result.get("severity") or
+            logic_result.get("severity", "unknown")
+        )
+        vlm_evidence_met = final_result.get("evidence_standard_met")
+        evidence_standard_met = (
+            vlm_evidence_met
+            if vlm_evidence_met is not None
+            else (status != "not_enough_information" and valid_image)
+        )
+        vlm_valid_image = final_result.get("valid_image")
+        final_valid_image = (
+            vlm_valid_image
+            if vlm_valid_image is not None
+            else valid_image
+        )
+
         raw_output_data = self._create_raw_output_data(
-            row, status,
-            logic_result.get("severity", "unknown"),
-            logic_result.get("issue_type", "unknown"),
-            logic_result.get("object_part", "unknown"),
-            risks, justification, valid_image,
+            row, status, severity, issue_type, object_part,
+            risks, justification, evidence_reason,
+            evidence_standard_met, final_valid_image,
             final_result.get("supporting_image_ids", "none")
         )
 
@@ -291,35 +386,35 @@ class ReasoningEngine:
 
         return validated_output
 
-    def _create_raw_output_data(self, row, status, severity, issue, part, risks, justification, valid, supporting="none") -> Dict:
+    def _create_raw_output_data(
+        self, row, status, severity, issue, part, risks,
+        justification, evidence_reason, evidence_standard_met,
+        valid_image, supporting="none"
+    ) -> Dict:
         if isinstance(supporting, list):
             supporting = ";".join(str(s) for s in supporting)
-        elif supporting is None:
+        elif not supporting or str(supporting).lower() in ("none", "null", "nan", ""):
             supporting = "none"
         else:
             supporting = str(supporting)
 
-        # Ensure risk_flags is a clean semicolon-separated string
-        # Strip "none" if other flags are present
+        # Strip "none" placeholder when real flags are present
         risks_clean = [r for r in risks if r != "none" and r.strip()]
-        if not risks_clean:
-            risks_final = ["none"]
-        else:
-            risks_final = list(set(risks_clean))
+        risks_final = list(set(risks_clean)) if risks_clean else ["none"]
 
         return {
             "user_id": str(row['user_id']),
             "image_paths": str(row['image_paths']),
             "user_claim": str(row['user_claim']),
             "claim_object": ClaimObjectEnum(row['claim_object']).value,
-            "evidence_standard_met": (status != "not_enough_information" and valid),
-            "evidence_standard_met_reason": justification[:200],
+            "evidence_standard_met": bool(evidence_standard_met),
+            "evidence_standard_met_reason": str(evidence_reason)[:200],
             "risk_flags": ";".join(risks_final),
             "issue_type": IssueTypeEnum(issue).value if issue in [e.value for e in IssueTypeEnum] else IssueTypeEnum.UNKNOWN.value,
             "object_part": ObjectPartEnum(part).value if part in [e.value for e in ObjectPartEnum] else ObjectPartEnum.UNKNOWN.value,
             "claim_status": ClaimStatusEnum(status).value if status in [e.value for e in ClaimStatusEnum] else ClaimStatusEnum.NOT_ENOUGH_INFORMATION.value,
-            "claim_status_justification": justification[:500],
+            "claim_status_justification": str(justification)[:500],
             "supporting_image_ids": supporting,
-            "valid_image": valid,
+            "valid_image": bool(valid_image),
             "severity": SeverityEnum(severity).value if severity in [e.value for e in SeverityEnum] else SeverityEnum.UNKNOWN.value
         }

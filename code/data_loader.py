@@ -72,7 +72,9 @@ class DataLoader:
                     relative_path = image_file.relative_to(images_path)
                     unique_key = str(relative_path)
                     self.image_directory_map[unique_key] = image_file
-                    
+                    # Also index with "images/" prefix to match claims.csv path format
+                    self.image_directory_map["images/" + unique_key] = image_file
+
                     # Also keep filename as fallback if it's unique, but unique_key is preferred
                     if image_file.name not in self.image_directory_map:
                          self.image_directory_map[image_file.name] = image_file
