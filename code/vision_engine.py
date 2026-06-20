@@ -61,19 +61,12 @@ class VisionEngine:
                 risk_flags.append("blurry_image")
                 is_valid = False
             
-            if brightness_score < self.BRIGHTNESS_MIN:
-                risk_flags.append("low_light")
-                is_valid = False
-            elif brightness_score > self.BRIGHTNESS_MAX:
-                risk_flags.append("high_glare")
-                is_valid = False
-            
-            if contrast_score < self.CONTRAST_THRESHOLD:
-                risk_flags.append("low_contrast")
+            if brightness_score < self.BRIGHTNESS_MIN or brightness_score > self.BRIGHTNESS_MAX or contrast_score < self.CONTRAST_THRESHOLD:
+                risk_flags.append("low_light_or_glare")
                 is_valid = False
                 
             if not has_object:
-                risk_flags.append("missing_object")
+                risk_flags.append("wrong_object")
                 is_valid = False
             
             # Calculate confidence score (0-1)

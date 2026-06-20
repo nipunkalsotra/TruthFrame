@@ -47,7 +47,7 @@ class TokenBucket:
         
         self.last_update = now
 
-    async def wait_for_slot(self, tokens: int = 0, timeout: float = 60.0):
+    async def wait_for_slot(self, tokens: int = 0, timeout: float = 300.0):
         """Wait until tokens and a request slot are available."""
         start_time = time.monotonic()
         while True:
@@ -72,13 +72,13 @@ class GlobalRateLimiter:
     def set_limit(self, service: str, tpm: int, rpm: int):
         self.buckets[service] = TokenBucket(tpm, rpm)
 
-    async def acquire(self, service: str, estimated_tokens: int = 1000):
+    async def acquire(self, service: str, estimated_tokens: int = 1000, timeout: float = 300.0):
         """Acquire a slot for the specified service."""
         bucket = self.buckets.get(service)
         if not bucket:
             return True # No limit defined for this service
             
-        success = await bucket.wait_for_slot(estimated_tokens)
+        success = await bucket.wait_for_slot(estimated_tokens, timeout=timeout)
         if not success:
             logger.warning(f"Rate limit timeout for service: {service}")
         return success

@@ -30,11 +30,11 @@ class DataLoader:
         self.image_directory_map: Dict[str, Path] = {}
         logger.info(f"DataLoader initialized. Dataset at: {self.dataset_path}")
     
-    def load_all_data(self) -> None:
+    def load_all_data(self, claims_filename: str = "claims.csv") -> None:
         logger.info("Starting zero-redundancy data loading...")
         self._load_user_history()
         self._load_evidence_requirements()
-        self._load_claims()
+        self._load_claims(claims_filename)
         self._index_image_directory()
         logger.info("Data loading complete.")
     
@@ -55,11 +55,11 @@ class DataLoader:
                 self.evidence_requirements_cache[key] = row.to_dict()
             logger.info(f"Cached {len(self.evidence_requirements_cache)} evidence requirements.")
     
-    def _load_claims(self) -> None:
-        path = self.dataset_path / "claims.csv"
+    def _load_claims(self, claims_filename: str = "claims.csv") -> None:
+        path = self.dataset_path / claims_filename
         if path.exists():
             self.claims_df = pd.read_csv(path)
-            logger.info(f"Loaded {len(self.claims_df)} claims.")
+            logger.info(f"Loaded {len(self.claims_df)} claims from {claims_filename}.")
     
     def _index_image_directory(self) -> None:
         """Index images using a unique composite key (parent_dir/filename) to prevent collisions."""

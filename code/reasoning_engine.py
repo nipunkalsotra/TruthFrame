@@ -52,11 +52,11 @@ class ReasoningEngine:
         )
 
         # Tiered Models (Operationally Superior Strategy)
-        # Using 1.5-flash for maximum stability on Free Tier
-        self.primary_model = "gemini-1.5-flash"
-        self.critic_model = "gemini-1.5-flash"
-        self.judge_model = "gemini-1.5-flash"
-        self.fallback_model = "gemini-1.5-flash"
+        # Using 2.5-flash for maximum stability on Free Tier
+        self.primary_model = "gemini-2.5-flash"
+        self.critic_model = "gemini-2.5-flash"
+        self.judge_model = "gemini-2.5-flash"
+        self.fallback_model = "gemini-2.5-flash"
 
         # Groq Fallback (Primary for Logic to save Gemini Quota)
         self.groq_client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
@@ -73,6 +73,44 @@ class ReasoningEngine:
             "images_processed": 0,
             "self_corrections": 0
         }
+
+    def _get_specific_applies_to(self, claim_object: str, issue_type: Any, object_part: Any) -> Optional[str]:
+        claim_object = str(claim_object).lower()
+        
+        # Safe list-to-string conversion
+        if isinstance(issue_type, list):
+            issue_type = " ".join(str(x) for x in issue_type)
+        else:
+            issue_type = str(issue_type)
+            
+        if isinstance(object_part, list):
+            object_part = " ".join(str(x) for x in object_part)
+        else:
+            object_part = str(object_part)
+            
+        issue_type = issue_type.lower()
+        object_part = object_part.lower()
+        
+        if claim_object == "car":
+            if any(x in issue_type for x in ("dent", "scratch")):
+                return "dent or scratch"
+            if any(x in issue_type for x in ("crack", "broken_part", "missing_part")):
+                return "crack, broken, or missing part"
+            if any(x in object_part for x in ("identity", "side", "orientation")):
+                return "vehicle identity or orientation"
+        elif claim_object == "laptop":
+            if any(x in object_part for x in ("screen", "keyboard", "trackpad")):
+                return "screen, keyboard, or trackpad"
+            if any(x in object_part for x in ("hinge", "lid", "corner", "body", "port", "base")):
+                return "hinge, lid, corner, body, or port"
+        elif claim_object == "package":
+            if any(x in issue_type for x in ("crushed_packaging", "torn_packaging")) or "seal" in object_part:
+                return "crushed, torn, or seal damage"
+            if any(x in issue_type for x in ("water_damage", "stain")) or "label" in object_part:
+                return "water, stain, or label damage"
+            if any(x in object_part for x in ("contents", "item")):
+                return "contents or inner item"
+        return None
 
     def _get_system_instruction(self, claim_object: ClaimObjectEnum, role: str = "Analyst") -> str:
         issue_types = [e.value for e in IssueTypeEnum]
@@ -258,6 +296,21 @@ class ReasoningEngine:
         )
         logic_result = await self._call_groq_logic(row, logic_prompt)
 
+        # 1.5. Dynamic specific evidence requirements fetching based on extracted intent
+        issue_type_logic = logic_result.get("issue_type", "unknown")
+        object_part_logic = logic_result.get("object_part", "unknown")
+        specific_applies = self._get_specific_applies_to(claim_object_val, issue_type_logic, object_part_logic)
+        
+        specific_req = None
+        if specific_applies:
+            specific_req = self.data_loader.get_evidence_requirement(claim_object_val, specific_applies)
+            
+        if specific_req:
+            req_instruction += (
+                f"- Specific Requirement ({specific_applies}): {specific_req.get('minimum_image_evidence')}\n"
+            )
+            logger.info(f"Applying specific evidence requirement '{specific_applies}' for {claim_object_val} (User: {user_id})")
+
         # 2. Primary Vision Review
         images = [self.data_loader.get_image(p) for p in image_paths if self.data_loader.get_image(p)]
         if images:
@@ -393,10 +446,19 @@ class ReasoningEngine:
     ) -> Dict:
         if isinstance(supporting, list):
             supporting = ";".join(str(s) for s in supporting)
-        elif not supporting or str(supporting).lower() in ("none", "null", "nan", ""):
-            supporting = "none"
         else:
-            supporting = str(supporting)
+            supporting = str(supporting) if supporting else "none"
+
+        # Normalize supporting_image_ids to bare filenames without path or extension (e.g. img_1)
+        if supporting and supporting.lower() not in ("none", "null", "nan", ""):
+            ids = [s.strip() for s in supporting.split(";") if s.strip()]
+            normalized_ids = []
+            for item in ids:
+                name = Path(item).stem
+                normalized_ids.append(name)
+            supporting = ";".join(normalized_ids) if normalized_ids else "none"
+        else:
+            supporting = "none"
 
         # Strip "none" placeholder when real flags are present
         risks_clean = [r for r in risks if r != "none" and r.strip()]

@@ -37,6 +37,23 @@ class SchemaValidator:
             }
         }
 
+        # Allowed parts per object type to enforce strict cross-object integrity
+        self.allowed_parts = {
+            "car": {
+                "front_bumper", "rear_bumper", "door", "hood", "windshield", 
+                "side_mirror", "headlight", "taillight", "fender", "quarter_panel", 
+                "body", "unknown"
+            },
+            "laptop": {
+                "screen", "keyboard", "trackpad", "hinge", "lid", 
+                "corner", "port", "base", "body", "unknown"
+            },
+            "package": {
+                "box", "package_corner", "package_side", "seal", "label", 
+                "contents", "item", "unknown"
+            }
+        }
+
     async def _call_groq_correction(self, prompt: str) -> Dict:
         try:
             response = await self.groq_client.chat.completions.create(
@@ -50,12 +67,37 @@ class SchemaValidator:
             return {}
 
     async def validate_and_correct(self, data: Dict[str, Any], original_row: Dict) -> ClaimOutput:
+        claim_object = str(original_row.get("claim_object", "")).lower().strip()
+
         # Step 1: Pre-validation Deterministic Mapping (Gap 2.6)
         for field, mapping in self.fuzzy_map.items():
             current_val = str(data.get(field, "")).lower()
             if current_val in mapping:
                 logger.info(f"Applying deterministic mapping for {field}: {current_val} -> {mapping[current_val]}")
                 data[field] = mapping[current_val]
+
+        # Step 1.5: Cross-Object Part Mappings & Validation
+        part = str(data.get("object_part", "")).lower().strip()
+        if claim_object == "package":
+            if part == "corner":
+                data["object_part"] = "package_corner"
+                part = "package_corner"
+            elif part in ("side", "flap"):
+                data["object_part"] = "package_side"
+                part = "package_side"
+        elif claim_object == "car":
+            if part == "glass":
+                data["object_part"] = "windshield"
+                part = "windshield"
+            elif part == "mirror":
+                data["object_part"] = "side_mirror"
+                part = "side_mirror"
+
+        # Verify against allowed parts per object type
+        if claim_object in self.allowed_parts:
+            if part not in self.allowed_parts[claim_object]:
+                logger.warning(f"Part '{part}' is invalid for claim_object '{claim_object}'. Resetting to 'unknown'.")
+                data["object_part"] = "unknown"
 
         try:
             # Attempt to validate with Pydantic

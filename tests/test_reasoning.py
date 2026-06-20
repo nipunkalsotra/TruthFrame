@@ -55,7 +55,8 @@ def test_reasoning_pipeline():
             
             # Step B: Full Reasoning Pipeline
             try:
-                output: ClaimOutput = reasoning.run_pipeline(row.to_dict(), vision_results)
+                import asyncio
+                output: ClaimOutput = asyncio.run(reasoning.run_pipeline_async(row.to_dict(), vision_results))
                 
                 # Step C: Validation of Output
                 logger.info("✅ Pipeline Execution: SUCCESS")

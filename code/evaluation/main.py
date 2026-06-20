@@ -37,12 +37,12 @@ def calculate_metrics(y_true, y_pred, metric_name):
     except Exception:
         return {f"{metric_name}_{m}": 0 for m in ['accuracy', 'precision', 'recall', 'f1']}
 
-def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is_final: bool = False):
+def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, output_filename: str = "output.csv", is_final: bool = False):
     """
     Generates a real-time 'Operationally Superior' evaluation report.
     Includes Metrics, Cost Analysis, and TPM/RPM Strategy.
     """
-    output_csv = dataset_path / "output.csv"
+    output_csv = dataset_path / output_filename
     sample_csv = dataset_path / "sample_claims.csv"
     
     # Save directly in the same folder as this script (code/evaluation/)
@@ -65,11 +65,11 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
         logger.error(f"Report generation error: {e}")
         return
 
-    # Pricing Assumptions (Gemini Flash & Groq)
+    # Pricing Assumptions (Gemini 1.5 Flash & Groq Llama 3.3 70B)
     GEMINI_FLASH_INPUT_COST = 0.075 / 1_000_000
     GEMINI_FLASH_OUTPUT_COST = 0.30 / 1_000_000
-    # Groq Llama 3 is currently free/extremely low, but we'll assume a standard tier
-    GROQ_COST = 0.05 / 1_000_000 
+    GROQ_LLAMA_INPUT_COST = 0.59 / 1_000_000
+    GROQ_LLAMA_OUTPUT_COST = 0.79 / 1_000_000
     
     gemini_tokens = operational_metrics.get("gemini_tokens", 0)
     groq_tokens = operational_metrics.get("groq_tokens", 0)
@@ -77,7 +77,8 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
     # Estimate cost (approximate 80/20 input/output split)
     est_cost = (gemini_tokens * 0.8 * GEMINI_FLASH_INPUT_COST) + \
                (gemini_tokens * 0.2 * GEMINI_FLASH_OUTPUT_COST) + \
-               (groq_tokens * GROQ_COST)
+               (groq_tokens * 0.8 * GROQ_LLAMA_INPUT_COST) + \
+               (groq_tokens * 0.2 * GROQ_LLAMA_OUTPUT_COST)
 
     # Build Report
     report = []
@@ -140,5 +141,24 @@ def generate_evaluation_report(dataset_path: Path, operational_metrics: dict, is
         f.write("\n".join(report))
 
 if __name__ == "__main__":
-    # Mock for testing
-    generate_evaluation_report(Path("dataset"), {"gemini_tokens": 5000, "groq_tokens": 1000})
+    import sys
+    import asyncio
+    
+    # Remove current script's directory from path to avoid collision with 'main'
+    current_dir = str(Path(__file__).resolve().parent)
+    sys.path = [p for p in sys.path if p and Path(p).resolve() != Path(current_dir).resolve()]
+    
+    # Add code/ directory to path
+    code_dir = str(Path(__file__).resolve().parent.parent)
+    if code_dir not in sys.path:
+        sys.path.insert(0, code_dir)
+        
+    import main
+    
+    # Run the evaluation pipeline (which automatically runs on sample_claims.csv and saves to output_sample.csv)
+    logger.info("Starting Evaluation Pipeline Run on sample_claims.csv...")
+    try:
+        asyncio.run(main.main_orchestrator(claims_filename="sample_claims.csv", is_eval_mode=True))
+        logger.info("Evaluation Pipeline finished successfully.")
+    except Exception as e:
+        logger.error(f"Evaluation Pipeline failed: {e}")
